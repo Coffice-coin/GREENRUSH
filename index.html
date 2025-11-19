@@ -962,39 +962,54 @@
     const TOKEN_RATE_SOL = 1000; // Display: GRUSH per 1 SOL (demo)
 
     function getProvider() {
-      // Phantom and many Solana wallets inject `window.solana`.
-      // Return any available provider rather than only Phantom to improve compatibility.
+      // Prefer Phantom, fall back to any injected solana provider.
       if (typeof window === 'undefined') return null;
       if (location && location.protocol === 'file:') {
-        // Phantom extension does not inject into file:// pages.
+        // Phantom does not inject into file:// pages; must serve over http(s).
         return null;
       }
+      if (window.solana && window.solana.isPhantom) return window.solana;
+      if (window.phantom && window.phantom.solana && window.phantom.solana.isPhantom) return window.phantom.solana;
+      // Generic provider fallback
       if (window.solana) return window.solana;
-      if (window.phantom && window.phantom.solana) return window.phantom.solana;
       return null;
     }
 
     async function connectWallet() {
       provider = getProvider();
       if (!provider) {
-        // Helpful guidance when provider isn't found
         if (location && location.protocol === 'file:') {
-          alert('Wallet not detected. Serve this page over http(s) (for example: run a local web server on localhost) and ensure Phantom is installed. Phantom does not inject into file:// pages.');
+          alert('Phantom not injected on file://. Run a local server (e.g. python -m http.server) then open http://localhost:8000');
         } else {
-          const install = confirm('Phantom (or a Solana wallet) was not detected. Would you like to open the Phantom install page?');
+          const install = confirm('No Solana wallet detected. Open Phantom install page?');
           if (install) window.open('https://phantom.app/', '_blank');
         }
         return;
       }
       try {
-        const resp = await provider.connect();
-        walletPubkey = resp.publicKey;
+        connectBtn.disabled = true;
+        connectBtn.textContent = 'Connecting…';
+        // Attempt trusted connection first to avoid popup if already approved
+        if (!provider.isConnected) {
+          try { await provider.connect({ onlyIfTrusted: true }); } catch (_) { /* ignore */ }
+        }
+        if (!provider.isConnected) {
+          const resp = await provider.connect();
+          walletPubkey = resp.publicKey || provider.publicKey;
+        } else {
+          walletPubkey = provider.publicKey;
+        }
+        if (!walletPubkey) throw new Error('Public key missing after connect');
         connectBtn.textContent = shortenAddress(walletPubkey.toString());
         connectBtn.classList.add('active');
         showToast('Wallet connected');
         await renderWalletPanel();
       } catch (err) {
         console.error('Connect failed', err);
+        connectBtn.textContent = 'Connect Wallet';
+        alert('Wallet connection failed or was rejected.');
+      } finally {
+        connectBtn.disabled = false;
       }
     }
 
@@ -1006,6 +1021,7 @@
       connectBtn.textContent = 'Connect Wallet';
       connectBtn.classList.remove('active');
       await renderWalletPanel();
+      showToast('Wallet disconnected');
     }
 
     connectBtn.addEventListener('click', async () => {
@@ -1123,12 +1139,41 @@
       }
     }
 
-    // initialize panel if Phantom already connected
+    // initialize panel and bind provider events
     (async () => {
       provider = getProvider();
-      if (provider && provider.isConnected) {
-        walletPubkey = provider.publicKey;
-        connectBtn.textContent = shortenAddress(walletPubkey.toString());
+      if (provider) {
+        // Attach event listeners once
+        if (!provider.__gr_listeners) {
+          provider.on && provider.on('connect', () => {
+            walletPubkey = provider.publicKey;
+            connectBtn.textContent = shortenAddress(walletPubkey.toString());
+            connectBtn.classList.add('active');
+            renderWalletPanel();
+            showToast('Wallet connected');
+          });
+          provider.on && provider.on('disconnect', () => {
+            walletPubkey = null;
+            connectBtn.textContent = 'Connect Wallet';
+            connectBtn.classList.remove('active');
+            renderWalletPanel();
+            showToast('Wallet disconnected');
+          });
+          provider.__gr_listeners = true;
+        }
+        if (provider.isConnected && provider.publicKey) {
+          walletPubkey = provider.publicKey;
+          connectBtn.textContent = shortenAddress(walletPubkey.toString());
+          connectBtn.classList.add('active');
+        } else {
+          // Attempt silent trusted connect
+          try { await provider.connect({ onlyIfTrusted: true }); } catch (_) {}
+          if (provider.isConnected && provider.publicKey) {
+            walletPubkey = provider.publicKey;
+            connectBtn.textContent = shortenAddress(walletPubkey.toString());
+            connectBtn.classList.add('active');
+          }
+        }
       }
       await renderWalletPanel();
     })();
